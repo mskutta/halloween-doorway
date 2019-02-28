@@ -22,7 +22,7 @@
 #include "SSD1306Ascii.h"
 #include "SSD1306AsciiWire.h"
 
-const unsigned long RUN_INTERVAL = 200;
+const unsigned long RUN_INTERVAL = 100;
 
 /* Variables */
 bool tripped = false;
