@@ -19,22 +19,22 @@
 #include <VL53L0X.h>
 
 // Display (SSD1306)
-#include "SSD1306Ascii.h"
-#include "SSD1306AsciiWire.h"
+#include <SSD1306Ascii.h>
+#include <SSD1306AsciiWire.h>
 
-const unsigned long RUN_INTERVAL = 100;
+const unsigned long RUN_INTERVAL = 200;
 
 /* Variables */
 bool tripped = false;
-int maxRange = 0;
+int lastRange = 0;
 unsigned int count = 0;
-unsigned long runTime = 0;
+unsigned long nextRun = 0;
 
 /* Display */
 SSD1306AsciiWire oled;
 
 /* WIFI */
-const char* ESP_NAME = "doorway";
+const char* ESP_NAME = "qlab-esp";
 const unsigned int OSC_PORT = 53000;
 char hostname[16] = {0};
 
@@ -146,10 +146,13 @@ void setup()
   // Calibrate
   oled.print(F("Calibrating...\r"));
   delay(1000);
-  while((maxRange = sensor.readRangeContinuousMillimeters()) > 1200) {
+  int calibrateCount = 0;
+  while((lastRange = sensor.readRangeContinuousMillimeters()) > 1200) {
+    oled.printf("Calibrate: %u\r", calibrateCount);
     delay(100);
+    calibrateCount++;
   }
-  oled.printf("max range: %u\n", maxRange);
+  oled.printf("ref range: %u\n", lastRange);
 
   /* LED */
   pinMode(LED_BUILTIN, OUTPUT);
@@ -166,32 +169,33 @@ void loop()
 {
   ArduinoOTA.handle();
   
-  if (millis() < runTime) {
+  if (millis() < nextRun) {
     return;
   }
+  nextRun = millis() + RUN_INTERVAL;
 
   int range = sensor.readRangeContinuousMillimeters();
   Serial.println(range);
   if (sensor.timeoutOccurred() || range > 1200 ) { 
-    return;  
+    return;
   }
 
   // Detect if tripped
-  if (range < (maxRange - 200) && !tripped) {
+  if ((range < (lastRange - 200)) && !tripped) {
     sendQLabOSCMessage(qLabMessage);
     digitalWrite(LED_BUILTIN, LOW);
     tripped = true;
     count++;
   } 
-  else if (range > (maxRange - 100) && tripped) {
+  else if (range > (lastRange + 200) && tripped) {
     digitalWrite(LED_BUILTIN, HIGH);
     tripped = false;
   }
 
   oled.printf("%4d%6d\r", range, count);
   oled.invertDisplay(tripped);
-  
-  runTime = millis() + RUN_INTERVAL;
+
+  lastRange = range;
 }
 
 void sendQLabOSCMessage(const char* address) {
@@ -202,14 +206,10 @@ void sendQLabOSCMessage(const char* address) {
   msg.empty();
 
   // Send message three times to ensure delivery.  Need to come up with a better approach.
-  delay(100);
-
   Udp.beginPacket(qLabIp, qLabPort);
   msg.send(Udp);
   Udp.endPacket();
   msg.empty();
-
-  delay(100);
 
   Udp.beginPacket(qLabIp, qLabPort);
   msg.send(Udp);
