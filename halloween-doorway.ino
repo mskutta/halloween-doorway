@@ -22,11 +22,16 @@
 #include <SSD1306Ascii.h>
 #include <SSD1306AsciiWire.h>
 
+// Future Settings storage reference:
+// https://github.com/guysoft/Mqtt_Wifi_manager/blob/master/mqtt_wifi_manager_moisture_sensor/mqtt_wifi_manager_moisture_sensor.ino
+
 const unsigned long RUN_INTERVAL = 200;
 
 /* Variables */
 bool tripped = false;
-int lastRange = 0;
+int maxRange = 0;
+int minRange = 0;
+
 unsigned int count = 0;
 unsigned long nextRun = 0;
 
@@ -147,12 +152,15 @@ void setup()
   oled.print(F("Calibrating...\r"));
   delay(1000);
   int calibrateCount = 0;
-  while((lastRange = sensor.readRangeContinuousMillimeters()) > 1200) {
+  int range = 0;
+  while((range = sensor.readRangeContinuousMillimeters()) > 1200) {
     oled.printf("Calibrate: %u\r", calibrateCount);
     delay(100);
     calibrateCount++;
   }
-  oled.printf("ref range: %u\n", lastRange);
+  oled.println(F("---------------------"));
+  maxRange = range;
+  minRange = range;
 
   /* LED */
   pinMode(LED_BUILTIN, OUTPUT);
@@ -181,21 +189,26 @@ void loop()
   }
 
   // Detect if tripped
-  if ((range < (lastRange - 200)) && !tripped) {
+  if ((range < (maxRange - 200)) && !tripped) {
     sendQLabOSCMessage(qLabMessage);
     digitalWrite(LED_BUILTIN, LOW);
     tripped = true;
+    minRange = range; // Reset minimum range
     count++;
   } 
-  else if (range > (lastRange + 200) && tripped) {
+  else if (range > (minRange + 200) && tripped) {
     digitalWrite(LED_BUILTIN, HIGH);
     tripped = false;
+    maxRange = range; // Reset max range
+  }
+  else if (range > maxRange) {
+    maxRange = range;
+  } else if (range < minRange) {
+    minRange = range;
   }
 
-  oled.printf("%4d%6d\r", range, count);
+  oled.printf("%4d %4d %4d %6d\r", minRange, range, maxRange, count);
   oled.invertDisplay(tripped);
-
-  lastRange = range;
 }
 
 void sendQLabOSCMessage(const char* address) {
