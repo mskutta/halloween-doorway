@@ -4,9 +4,7 @@
 #include <ArduinoOTA.h> // Updates over the air
 
 // WiFi Manager
-#include <DNSServer.h>
-#include <ESP8266WebServer.h>
-#include <WiFiManager.h> 
+#include <IotWebConf.h>
 
 // OSC
 #include <OSCMessage.h> // for sending OSC messages
@@ -19,12 +17,14 @@
 #include <VL53L0X.h>
 
 // Display (SSD1306)
-#include "SSD1306Ascii.h"
-#include "SSD1306AsciiWire.h"
+#include <SSD1306Ascii.h>
+#include <SSD1306AsciiWire.h>
 
 const unsigned long RUN_INTERVAL = 100;
 
 /* Variables */
+const char* SERVICE_NAME = "qlab-lidar";
+
 bool tripped = false;
 int maxRange = 0;
 unsigned int count = 0;
@@ -33,21 +33,41 @@ unsigned long runTime = 0;
 /* Display */
 SSD1306AsciiWire oled;
 
-/* WIFI */
-const char* ESP_NAME = "doorway";
-const unsigned int OSC_PORT = 53000;
-char hostname[16] = {0};
-
 /* VL53L0X */
 VL53L0X sensor;
 
 /* OSC */
 WiFiUDP Udp;
-
+const unsigned int OSC_PORT = 53000;
 String qLabHostname;
 IPAddress qLabIp;
 unsigned int qLabPort;
 char qLabMessage[64] = {0};
+
+/* IotWebConf */
+//char thingName[] = "qlab-lidar-000000";
+const String espChipId = String(ESP.getChipId(), HEX);
+const char * thingName = espChipId.c_str();
+const char wifiInitialApPassword[] = "********"; // Initial password to connect to the Thing, when it creates an own Access Point.
+
+#define CONFIG_PIN D8 // When CONFIG_PIN is pulled to ground on startup, the Thing will use the initial password to build an AP. (E.g. in case of lost password)
+#define CONFIG_VERSION "1" // Configuration specific key. The value should be modified if config structure was changed.
+#define STATUS_PIN LED_BUILTIN // Status indicator pin. First it will light up (kept LOW), on Wifi connection it will blink, when connected to the Wifi it will turn off (kept HIGH).
+
+// Callback method declarations.
+void configSaved();
+boolean formValidator();
+void wifiConnected();
+
+DNSServer dnsServer;
+ESP8266WebServer httpServer(80);
+HTTPUpdateServer httpUpdater;
+
+#define STRING_LEN 128
+char oscCommandValue[STRING_LEN];
+
+IotWebConf iotWebConf(thingName, &dnsServer, &httpServer, wifiInitialApPassword, CONFIG_VERSION);
+IotWebConfParameter oscCommandParam = IotWebConfParameter("OSC command", "oscCommand", oscCommandValue, STRING_LEN);
 
 void setup()
 {
@@ -62,30 +82,29 @@ void setup()
   oled.setScrollMode(SCROLL_MODE_AUTO);
   oled.clear();
 
-  /* WiFi */
-  sprintf(hostname, "%s-%06X", ESP_NAME, ESP.getChipId());
-  WiFiManager wifiManager;
-  wifiManager.setAPCallback(configModeCallback);
-  if(!wifiManager.autoConnect(hostname)) {
-    oled.println("WiFi Connect Failed");
-    //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(1000);
-  } 
+  oled.println(thingName);
 
+  /* IotWebConf */
+  iotWebConf.setStatusPin(STATUS_PIN);
+  iotWebConf.setConfigPin(CONFIG_PIN);
+  iotWebConf.addParameter(&oscCommandParam);
+  iotWebConf.setConfigSavedCallback(&configSaved);
+  iotWebConf.setFormValidator(&formValidator);
+  iotWebConf.setWifiConnectionCallback(&wifiConnected);
+  iotWebConf.getApTimeoutParameter()->visible = true;
+  iotWebConf.setupUpdateServer(&httpUpdater);
+  
+  iotWebConf.init();
+
+  httpServer.on("/", handleRoot);
+  httpServer.on("/config", []{ iotWebConf.handleConfig(); });
+  httpServer.onNotFound([](){ iotWebConf.handleNotFound(); });
+  
   /* UDP */
   Udp.begin(OSC_PORT);
 
-  oled.println(hostname);
-  oled.print(F("  "));
-  oled.print(WiFi.localIP());
-  oled.print(F(":"));
-  oled.println(Udp.localPort());
-  oled.print(F("  "));
-  oled.println(WiFi.macAddress());
-  
   /* OTA */
-  ArduinoOTA.setHostname(hostname);
+  ArduinoOTA.setHostname(thingName);
   ArduinoOTA.onStart([]() {
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
@@ -115,14 +134,15 @@ void setup()
 
   /* mDNS */
   // Initialization happens inside ArduinoOTA;
-  MDNS.addService(ESP_NAME, "udp", OSC_PORT);
+  // MDNS.addService(SERVICE_NAME, "udp", OSC_PORT);
 
   // Discover qLab
   int queryCount = 0;
   while (MDNS.queryService("qlab", "udp") == 0) {
     oled.printf("find qlab: %u\r", queryCount);
+    iotWebConf.doLoop();
     ArduinoOTA.handle();
-    delay(1000);
+    //delay(1000);
     queryCount++;
   }
   qLabHostname = MDNS.hostname(0);
@@ -145,9 +165,9 @@ void setup()
 
   // Calibrate
   oled.print(F("Calibrating...\r"));
-  delay(1000);
+  iotWebConf.delay(1000);
   while((maxRange = sensor.readRangeContinuousMillimeters()) > 1200) {
-    delay(100);
+    iotWebConf.delay(100);
   }
   oled.printf("max range: %u\n", maxRange);
 
@@ -156,14 +176,9 @@ void setup()
   digitalWrite(LED_BUILTIN, HIGH);
 }
 
-void configModeCallback (WiFiManager *myWiFiManager) {
-  oled.println(F("Config Mode"));
-  oled.println(WiFi.softAPIP());
-  oled.println(myWiFiManager->getConfigPortalSSID());
-}
-
 void loop()
 {
+  iotWebConf.doLoop();
   ArduinoOTA.handle();
   
   if (millis() < runTime) {
@@ -194,6 +209,8 @@ void loop()
   runTime = millis() + RUN_INTERVAL;
 }
 
+
+
 void sendQLabOSCMessage(const char* address) {
   OSCMessage msg(address);
   Udp.beginPacket(qLabIp, qLabPort);
@@ -215,4 +232,44 @@ void sendQLabOSCMessage(const char* address) {
   msg.send(Udp);
   Udp.endPacket();
   msg.empty();
+}
+
+void handleRoot() {
+  // -- Let IotWebConf test and handle captive portal requests.
+  if (iotWebConf.handleCaptivePortal())
+  {
+    // -- Captive portal request were already served.
+    return;
+  }
+  String s = "<!DOCTYPE html><html lang=\"en\"><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1, user-scalable=no\"/>";
+  s += "<title>qLab LiDaR Parameters</title></head><body>Hello world!";
+  s += "<ul>";
+  s += "<li>OSC Command Value: ";
+  s += oscCommandValue;
+  s += "</li>";
+  s += "</ul>";
+  s += "Go to <a href='config'>configure page</a> to change values.";
+  s += "</body></html>\n";
+
+  httpServer.send(200, "text/html", s);
+}
+
+void configSaved() {
+  oled.println(F("Config Updated"));
+}
+
+boolean formValidator() {
+  oled.println(F("Validating Form"));
+  boolean valid = true;
+  return valid;
+}
+
+void wifiConnected()
+{
+  oled.print(F("  "));
+  oled.print(WiFi.localIP());
+  oled.print(F(":"));
+  oled.println(Udp.localPort());
+  oled.print(F("  "));
+  oled.println(WiFi.macAddress());
 }
